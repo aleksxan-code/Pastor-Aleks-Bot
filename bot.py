@@ -22,7 +22,6 @@ AUTO_REPLY = os.getenv("AUTO_REPLY", "1") in {"1", "true", "True", "yes", "YES"}
 
 Lang = Literal["ru", "en", "uk"]
 
-# Category IDs are short & ASCII to avoid Telegram's 64-byte callback_data limit
 CATEGORY_DEFS = [
     {"id": "idea",     "ru": "💡 Есть идея",                 "en": "💡 I have an idea",            "uk": "💡 Є ідея"},
     {"id": "volunteer","ru": "🤝 Служение и волонтёрство",   "en": "🤝 Ministry & volunteering",    "uk": "🤝 Служіння та волонтерство"},
@@ -31,7 +30,6 @@ CATEGORY_DEFS = [
     {"id": "pastor",   "ru": "📖 Встреча с пастором",         "en": "📖 Meet the pastor",            "uk": "📖 Зустріч з пастором"},
 ]
 
-# Precompute per-language label lookup by id
 LABEL_BY_ID: Dict[Lang, Dict[str, str]] = {
     "ru": {c["id"]: c["ru"] for c in CATEGORY_DEFS},
     "en": {c["id"]: c["en"] for c in CATEGORY_DEFS},
@@ -42,6 +40,12 @@ PROMPTS = {
     "ru": "Выберите категорию:",
     "en": "Choose a category:",
     "uk": "Оберіть категорію:",
+}
+
+TYPE_PROMPT = {
+    "ru": "✍️ Вы выбрали: «{label}». Напишите ваше сообщение, и я передам его администратору.",
+    "en": "✍️ You chose: “{label}”. Please type your message and I will forward it to the administrator.",
+    "uk": "✍️ Ви обрали: «{label}». Напишіть своє повідомлення, і я передам його адміністратору.",
 }
 
 CHANGE_LANG_BTN = {"ru": "🌐 Сменить язык", "en": "🌐 Change language", "uk": "🌐 Змінити мову"}
@@ -93,7 +97,6 @@ def menu_inline_keyboard(lang: Lang) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def is_menu_label(text: str, lang: Optional[Lang]) -> Optional[str]:
-    """Return category_id if the text equals a menu label (fallback for typed labels)."""
     if not lang or not text:
         return None
     for cid, label in LABEL_BY_ID[lang].items():
@@ -127,20 +130,21 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ud["lang"] = lang
             ud.pop("category_id", None)
             await query.answer()
-            # No greeting here (per request). Go straight to category menu.
+            # go straight to category menu (no big greeting)
             await query.message.reply_text(PROMPTS[lang], reply_markup=menu_inline_keyboard(lang))
             return
 
         if data == "change_lang":
-            # Switch language flow WITHOUT greeting (mid-session)
             ud.pop("category_id", None)
-            # Do not clear lang so that language buttons show, selection will set a new lang
             await query.answer()
             try:
                 await query.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            await query.message.reply_text("Choose language / Выберите язык / Оберіть мову:", reply_markup=lang_inline_keyboard())
+            await query.message.reply_text(
+                "Choose language / Выберите язык / Оберіть мову:",
+                reply_markup=lang_inline_keyboard()
+            )
             return
 
         if data == "finish":
@@ -157,7 +161,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if data.startswith("cat:"):
             cid = data.split(":", 1)[1]
             ud["category_id"] = cid
+            lang = ud.get("lang", "ru")
+            # send a short prompt so user knows to type the message
+            label = LABEL_BY_ID.get(lang, LABEL_BY_ID["ru"]).get(cid, cid)
             await query.answer()
+            await query.message.reply_text(TYPE_PROMPT.get(lang, TYPE_PROMPT["en"]).format(label=label))
             return
     except Exception as e:
         logging.exception("Callback error: %s", e)
@@ -172,13 +180,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lang: Optional[Lang] = context.user_data.get("lang")
     category_id: Optional[str] = context.user_data.get("category_id")
 
-    # Fallback: if user typed a category label as plain text
     typed_cid = is_menu_label(text, lang)
     if typed_cid:
         context.user_data["category_id"] = typed_cid
+        # also nudge to type message
+        label = LABEL_BY_ID[lang][typed_cid]
+        await msg.reply_text(TYPE_PROMPT[lang].format(label=label))
         return
 
-    # If category chosen, forward next message to admin, then reset category and show menu
     if category_id and lang:
         label = LABEL_BY_ID[lang].get(category_id, category_id)
         header = (
@@ -204,12 +213,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await show_menu(update, lang)
         return
 
-    # No language yet -> show ONLY language picker (not full greeting)
     if not lang:
         await msg.reply_text("Choose language / Выберите язык / Оберіть мову:", reply_markup=lang_inline_keyboard())
         return
 
-    # Language set but no category yet -> show category menu
     await show_menu(update, lang)
 
 # ---------------- Entrypoint ----------------
